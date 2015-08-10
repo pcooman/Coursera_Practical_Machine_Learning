@@ -1,0 +1,198 @@
+---
+title: "Prediciting activity class based on fitness tracker data"
+author: "Peter Cooman"
+date: "Monday, August 10, 2015"
+output: html_document
+---
+
+Fitness trackers like the Nike Fuelband and the Fitbit provide us with a wealth of information. Research participants were asked to perforam barbell lifts both correctly and incorrectly in five different ways. The goal of this project is to train a model that allows us to classify the various observations among these five classes based on acceleration measurements.
+
+We begin by reading in the training and testing data sets:
+
+```{r, echo = TRUE, cache=TRUE}
+training <- read.csv("pml-training.csv", header = TRUE, na.strings = "NA", stringsAsFactors = FALSE)
+testing <- read.csv("pml-testing.csv", header = TRUE, na.strings = "NA", stringsAsFactors = FALSE)
+```
+
+Next, we take a quick look at the data and its structure:
+
+```{r, echo = TRUE, results = "hide"}
+head(training)
+head(testing)
+
+summary(training)
+summary(testing)
+
+# Output suppressed for the sake of brevity
+```
+
+These summaries show us that the there are 160 featues. However, many columns contain a large number of missing values. In fact we find that for 100 columns in the testing set all data is missing. Since these features are effectively unavailable when making predictions, we will discard them in both the training and testing data sets:
+
+```{r, echo=TRUE}
+testing <- testing[ ,!apply(testing,2, function(x) all(is.na(x))) ]
+
+# split off labels first so we don't lose them
+labels <- training$classe
+
+# only retain features that are also present in the testing set
+training <- training[,names(training) %in% names(testing)]
+```
+
+We  now have three sets: labels, which contains the activity classes for the training data set, and the training and testing data sets, which each contain the same 6 features without any missing data.
+
+As for the predicitve model, I have chosen a Random Forest. This approach ahs many advantages: it is applicable to classification problem, is often highly accurate and is easy to tune. Random Forests do have some drawbacks. They can take a long time to train if there is a lot of data and they are difficult to interpret. However, the data set is relatively small (19622 observations) and interpreatability is not a significant concern for this assignment, so these issues should not be a concern.
+
+Random Forest does require that all data is provided in numerical form. In our data sets, we have three features that need to be adapted:
+* classe
+* user_name
+* cvtd_timestamp
+* new_window
+
+First, we convert classe (A through E) to the numbers 1 through 5 respectively.
+
+```{r, echo=TRUE}
+labels <- as.factor(labels)
+labels <- as.factor(match(labels, levels(labels)))  # convert to numeric
+```
+
+Next, we convert the user_name categories to numerical values:
+
+```{r, echo=TRUE}
+# define as factors first
+training$user_name <- as.factor(training$user_name)
+testing$user_name <- as.factor(testing$user_name)
+
+# then convert to numericals, making sure that both training and testing sets use the same replacement table
+# 1: Adelmo, 2: Carlitos, 3: Charles, 4: Eurico, 5: Jeremy, 6: Pedro
+testing$user_name <- match(testing$user_name, levels(training$user_name))
+training$user_name <- match(training$user_name, levels(training$user_name))
+```
+
+Next, we expand the cvtd_timestamp column into multiple columns corresponding to day, month, year, hour and minute:
+
+```{r, echo=TRUE}
+library(lubridate)
+# For the training data set
+training$day <- mday(dmy_hm(training$cvtd_timestamp))
+training$month <- month(dmy_hm(training$cvtd_timestamp))
+#training$year <- year(dmy_hm(training$cvtd_timestamp))   
+training$hour <- hour(dmy_hm(training$cvtd_timestamp))
+training$minute <- hour(dmy_hm(training$cvtd_timestamp))
+training$cvtd_timestamp <- NULL
+
+# Need to repeat this for the testing data set
+testing$day <- mday(dmy_hm(testing$cvtd_timestamp))
+testing$month <- month(dmy_hm(testing$cvtd_timestamp))
+#testing$year <- year(dmy_hm(testing$cvtd_timestamp))    
+testing$hour <- hour(dmy_hm(testing$cvtd_timestamp))
+testing$minute <- hour(dmy_hm(testing$cvtd_timestamp))
+testing$cvtd_timestamp <- NULL
+```
+
+Note that the year feature has been omitted, given that all data was collected in 2011.
+
+Next, we replace the new_window feature in both data sets with either 0 for "no" or 1 for "yes":
+
+```{r, echo=TRUE}
+training$new_window <- ifelse(training$new_window == "no",0,1)
+testing$new_window <- ifelse(testing$new_window == "no",0,1)
+```
+
+Finally, I removed the index numbers.
+```{r, echo=TRUE}
+# Remove problem_id from test set
+testing$problem_id <- NULL
+
+# remove indeces
+training$X <- NULL
+testing$X <- NULL
+```
+
+Our data is now ready for training the model. We have sufficient observations to do a classic data partitioning. Here, I chose to use 75% of the training data to train the data. I set aside the remaining 25% for cross validation.
+
+```{r, echo=TRUE}
+library(caret)
+set.seed(666)
+
+inTrain = createDataPartition(labels, p = 0.75)[[1]]
+
+CVtraining_feats <- training[inTrain,]
+CVtraining_labels <- labels[inTrain]
+CVtesting_feats <- training[-inTrain,]
+CVtesting_labels <- labels[-inTrain]
+```
+
+Next, we train a Random Forest model on the cross validation training set.
+
+```{r, echo=TRUE, cache=TRUE}
+library(randomForest)
+RF_model <- randomForest(x = CVtraining_feats, y = CVtraining_labels, ntree = 100, importance = TRUE)
+```
+
+A quick plot of the training error shows that 100 trees is more than enough. The classification error plateaud much earlier.
+
+```{r, echo=TRUE}
+windows()
+plot(RF_model)
+```
+
+From the plot of the feature importance we can see that the most impor features were:
+* raw_timestamp_part_1
+* yaw_belt
+* roll_belt
+* magnet_dumbbell_z
+* pitch_belt
+
+```{r, echo=TRUE, fig.width = 6, fig.height = 13, message = FALSE}
+imp <- importance(RF_model, type=1)
+featureImportance <- data.frame(Feature=row.names(imp), Importance=imp[,1])
+
+windows()
+p <- ggplot(featureImportance, aes(x=reorder(Feature, Importance), y=Importance)) +
+  geom_bar(stat="identity", fill="#53cfff") +
+  coord_flip() + 
+  theme_light(base_size=20) +
+  xlab("Importance") +
+  ylab("") + 
+  ggtitle("Random Forest Feature Importance\n") +
+  theme(plot.title=element_text(size=18))
+print(p)
+```
+
+To get an estimate of the accuracy of our model, we compute the model predictions for the cross validation training set (which we used to train the model). We find that the model achieves perfect accuracy: 100% correct classification.
+
+```{r, echo=TRUE}
+RF_preds_train <- predict(RF_model, newdata = CVtraining_feats)
+confusionMatrix(RF_preds_train,CVtraining_labels)
+```
+
+Our model fits the training dtaa perfectly, but we may be overfitting. To get a better idea of the true classifcation accurcy, we need to predict the labels for the cross validation testing set.
+
+```{r, echo=TRUE}
+RF_preds_test <- predict(RF_model, newdata = CVtesting_feats)
+confusionMatrix(RF_preds_test,CVtesting_labels)
+```
+
+We find that the Random Forest model achieves an out of sample accuracy of 99.94%. This should be accurate enough!
+
+The only thing left to do is to make our predictions for the original testing data set (20 observations) and to save the results in the correct file formats.
+
+```{r, echo=TRUE}
+# Predictions for evaluation set
+RF_preds_eval <- predict(RF_model,newdata = testing)
+RF_preds_eval
+```
+
+```{r, echo=TRUE}
+answers = c("B","A","B","A","A","E","D","B","A","A","B","C","B","A","E","E","A","B","B","B")
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+```
